@@ -23,7 +23,7 @@ def handle_error(error, error_obj, r, url, visited, error_codes):
     print(f'{error} ERROR while visiting {url}')
 
 
-def crawl(url, visit_external):
+def crawl(url, visit_external, depth=2):
     visited = set()
     edges = set()
     resource_pages = set()
@@ -37,78 +37,82 @@ def crawl(url, visit_external):
     to_visit = deque()
     to_visit.append((site_url, None))
 
-    while to_visit:
-        url, from_url = to_visit.pop()
+    while depth and to_visit:
+        depth -= 1
+        layer_count = len(to_visit)
 
-        print('Visiting', url, 'from', from_url)
+        for _ in range(layer_count):
+            url, from_url = to_visit.popleft()
 
-        error = False
-        error_obj = None
-        try:
-            page = requests.get(url, timeout=10)
-        except requests.exceptions.RequestException as e:
-            error = True
-            error_obj = e
+            print('Visiting', url, 'from', from_url)
 
-        if error or not page:
-            handle_error(error, error_obj, page, url, visited, error_codes)
-            continue
-        
-        soup = BeautifulSoup(page.text, 'html.parser')
-        internal_links = set()
-        external_links = set()
+            error = False
+            error_obj = None
+            try:
+                page = requests.get(url, timeout=10)
+            except requests.exceptions.RequestException as e:
+                error = True
+                error_obj = e
 
-        # Handle <base> tags
-        base_url = soup.find('base')
-        base_url = '' if base_url is None else base_url.get('href', '')
-
-        for link in soup.find_all('a', href=True):
-            link_url = link['href']
-        
-            if link_url.startswith('mailto:'):
+            if error or not page:
+                handle_error(error, error_obj, page, url, visited, error_codes)
                 continue
             
-            # Resolve relative paths
-            if not link_url.startswith('http'):
-                link_url = urllib.parse.urljoin(url, urllib.parse.urljoin(base_url, link_url))
+            soup = BeautifulSoup(page.text, 'html.parser')
+            internal_links = set()
+            external_links = set()
 
-            # Remove queries/fragments from internal links
-            if link_url.startswith(site_url):
-                link_url = urllib.parse.urljoin(link_url, urllib.parse.urlparse(link_url).path)
+            # Handle <base> tags
+            base_url = soup.find('base')
+            base_url = '' if base_url is None else base_url.get('href', '')
 
-            # Load where we know that link_url will be redirected
-            if link_url in redirect_target_url:
-                link_url = redirect_target_url[link_url]
-
-            if link_url not in visited and (visit_external or link_url.startswith(site_url)):
-                is_html = False
-                error = False
-                error_obj = None
-
-                try:
-                    head = requests.head(link_url, timeout=10)
-                    if head and 'html' in head.headers.get('content-type', ''):
-                        is_html = True
-                except requests.exceptions.RequestException as e:
-                    error = True
-                    error_obj = e
-
-                if error or not head:
-                    handle_error(error, error_obj, head, link_url, visited, error_codes)
-                    edges.add((url, link_url))
-                    continue
-
-                redirect_target_url[link_url] = head.url
-                link_url = head.url
-                visited.add(link_url)
-
-                if link_url.startswith(site_url):
-                    if is_html:
-                        to_visit.append((head.url, url))
-                    else:
-                        resource_pages.add(link_url)
+            for link in soup.find_all('a', href=True):
+                link_url = link['href']
             
-            edges.add((url, link_url))
+                if link_url.startswith('mailto:'):
+                    continue
+                
+                # Resolve relative paths
+                if not link_url.startswith('http'):
+                    link_url = urllib.parse.urljoin(url, urllib.parse.urljoin(base_url, link_url))
+
+                # Remove queries/fragments from internal links
+                if link_url.startswith(site_url):
+                    link_url = urllib.parse.urljoin(link_url, urllib.parse.urlparse(link_url).path)
+
+                # Load where we know that link_url will be redirected
+                if link_url in redirect_target_url:
+                    link_url = redirect_target_url[link_url]
+
+                if link_url not in visited and (visit_external or link_url.startswith(site_url)):
+                    is_html = False
+                    error = False
+                    error_obj = None
+
+                    try:
+                        head = requests.head(link_url, timeout=10)
+                        if head and 'html' in head.headers.get('content-type', ''):
+                            is_html = True
+                    except requests.exceptions.RequestException as e:
+                        error = True
+                        error_obj = e
+
+                    if error or not head:
+                        handle_error(error, error_obj, head, link_url, visited, error_codes)
+                        edges.add((url, link_url))
+                        continue
+
+                    redirect_target_url[link_url] = head.url
+                    link_url = head.url
+                    visited.add(link_url)
+
+                    if link_url.startswith(site_url):
+                        if is_html:
+                            to_visit.append((head.url, url))
+                        else:
+                            resource_pages.add(link_url)
+
+                edges.add((url, link_url))
 
     return edges, error_codes, resource_pages
 
@@ -197,6 +201,7 @@ if __name__ == '__main__':
     parser.add_argument('--force', action='store_true', help='override warnings about base URL')
     parser.add_argument('--save-txt', type=str, nargs='?', help='filename in which to save adjacency matrix (if no argument, uses adj_matrix.txt). Also saves node labels to [filename]_nodes.txt', const='adj_matrix.txt', default=None)
     parser.add_argument('--save-npz', type=str, nargs='?', help='filename in which to save sparse adjacency matrix (if no argument, uses adj_matrix.npz). Also saves node labels to [filename]_nodes.txt',  const='adj_matrix.npz', default=None)
+    parser.add_argument('--depth', type=int, help='depth of breadth first search to perform, negative values mean there is no limit', default=-1)
 
     args = parser.parse_args()
 
@@ -211,7 +216,7 @@ if __name__ == '__main__':
                 print('Warning: not using https. If you really want to use http, run with --force')
                 exit(1)
 
-        edges, error_codes, resource_pages = crawl(args.site_url, args.visit_external)
+        edges, error_codes, resource_pages = crawl(args.site_url, args.visit_external, args.depth)
         print('Crawl complete.')
 
         with open(args.data_file, 'wb') as f:
